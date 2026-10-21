@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PHP Risk Check</title>
+<style>
+  :root {
+    --bg: #f6f5f2; --surface: #ffffff; --text: #1d1d1b; --muted: #6b6a66; --border: #e3e1dc;
+    --accent: #3b5bdb; --accent-text: #ffffff;
+    --crit: #b42318; --crit-bg: #fdecea;
+    --high: #b54708; --high-bg: #fef3e2;
+    --low: #067647; --low-bg: #e8f5ee;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #141413; --surface: #1e1e1c; --text: #ecebe7; --muted: #a09f9a; --border: #33322f;
+      --accent: #7b93f0; --accent-text: #0f1220;
+      --crit: #f97066; --crit-bg: #3a1714;
+      --high: #fdb022; --high-bg: #35260c;
+      --low: #47cd89; --low-bg: #0f2a1c;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 16px/1.55 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  main { max-width: 680px; margin: 0 auto; padding: 48px 16px 64px; }
+  .eyebrow { font-size: 13px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--crit); margin: 0 0 8px; }
+  h1 { font-size: clamp(28px, 6vw, 38px); line-height: 1.15; margin: 0 0 12px; letter-spacing: -.01em; }
+  .lede { color: var(--muted); margin: 0 0 28px; }
+  form { display: flex; gap: 8px; }
+  input {
+    flex: 1; min-width: 0; font: inherit; padding: 13px 14px; border-radius: 10px;
+    border: 1px solid var(--border); background: var(--surface); color: var(--text);
+  }
+  input:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+  button {
+    font: inherit; font-weight: 600; padding: 13px 20px; border: 0; border-radius: 10px;
+    background: var(--accent); color: var(--accent-text); cursor: pointer; white-space: nowrap;
+  }
+  button:disabled { opacity: .6; cursor: progress; }
+  .hint { font-size: 13px; color: var(--muted); margin: 8px 0 0; }
+  #out { margin-top: 32px; }
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 24px; }
+  .verdict { border-left: 6px solid var(--c); background: var(--cbg); border-radius: 14px; padding: 20px 22px; margin-bottom: 16px; }
+  .verdict .lvl { font-size: 13px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; color: var(--c); }
+  .verdict h2 { margin: 4px 0 6px; font-size: 24px; line-height: 1.2; }
+  .verdict p { margin: 0; }
+  .critical { --c: var(--crit); --cbg: var(--crit-bg); }
+  .high { --c: var(--high); --cbg: var(--high-bg); }
+  .low { --c: var(--low); --cbg: var(--low-bg); }
+  h3 { font-size: 15px; margin: 22px 0 8px; }
+  h3:first-child { margin-top: 0; }
+  ol, ul { margin: 0; padding-left: 20px; }
+  li { margin: 4px 0; }
+  .meta { font-size: 14px; color: var(--muted); }
+  .meta code { font-size: 13px; }
+  .err { color: var(--crit); }
+  footer { margin-top: 40px; font-size: 13px; color: var(--muted); }
+  footer a { color: inherit; }
+  @media (max-width: 480px) { form { flex-direction: column; } }
+</style>
+</head>
+<body>
+<main>
+  <p class="eyebrow">php2shell · CVE-2026-109618 / 109619</p>
+  <h1>Is your website at risk from the PHP flaws?</h1>
+  <p class="hint" style="margin:0 0 12px">Last updated: 21 October 2026</p>
+  <p class="lede">CERT-EU warns that sites which can't be patched may need to go offline. Enter your website and we'll tell you how exposed it looks and what to do.</p>
+
+  <form id="f">
+    <input id="u" type="text" inputmode="url" autocomplete="url" placeholder="example.com" aria-label="Website address" required>
+    <button id="b" type="submit">Check site</button>
+  </form>
+  <p class="hint">Passive check: we load your homepage and <code>/index.php</code> and read the public headers. Nothing is attacked.</p>
+
+  <div id="out" aria-live="polite"></div>
+
+  <footer>
+    This tool gives an indication, not a guarantee. It can't see PHP versions that are hidden, and hosts sometimes backport fixes without changing the version number. When in doubt, ask your hosting company.
+    Fixed version numbers come from reporting ahead of the official advisory. Check <a href="https://www.php.net/" rel="noopener">php.net</a>.
+  </footer>
+</main>
+
+<script>
+const f = document.getElementById("f");
+const u = document.getElementById("u");
+const b = document.getElementById("b");
+const out = document.getElementById("out");
+
+const LEVEL = { critical: "Critical risk", high: "High risk", low: "Low risk" };
+
+function el(tag, attrs = {}, ...kids) {
+  const n = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) n.setAttribute(k, v);
+  for (const k of kids) n.append(k);
+  return n;
+}
+function list(tag, items) { return el(tag, {}, ...items.map(t => el("li", {}, t))); }
+
+function render(r) {
+  const a = r.assessment, d = r.detection;
+  const card = el("div", { class: "card" });
+  card.append(el("h3", {}, "What to do"), list("ol", a.actions));
+  if (d.evidence.length) card.append(el("h3", {}, "What we found"), list("ul", d.evidence));
+  if (a.notes.length) card.append(el("h3", {}, "Good to know"), list("ul", a.notes));
+  const meta = el("p", { class: "meta" }, "Checked ", el("code", {}, r.url), " at " + new Date(r.scannedAt).toLocaleString());
+  card.append(meta);
+
+  out.replaceChildren(
+    el("div", { class: "verdict " + a.level },
+      el("div", { class: "lvl" }, LEVEL[a.level]),
+      el("h2", {}, a.verdict),
+      el("p", {}, el("strong", {}, a.headline + ". "), a.summary)),
+    card);
+}
+
+f.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  b.disabled = true; b.textContent = "Checking…";
+  out.replaceChildren(el("p", { class: "meta" }, "Contacting the site. This can take up to 15 seconds."));
+  try {
+    const res = await fetch("/api/scan?url=" + encodeURIComponent(u.value));
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "Check failed.");
+    render(data);
+  } catch (err) {
+    out.replaceChildren(el("p", { class: "err" }, err.message));
+  } finally {
+    b.disabled = false; b.textContent = "Check site";
+  }
+});
+</script>
+</body>
+</html>

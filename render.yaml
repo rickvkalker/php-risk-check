@@ -1,0 +1,7 @@
+services:
+  - type: web
+    name: php-risk-check
+    runtime: node
+    plan: free
+    buildCommand: "true"
+    startCommand: node server.js
