@@ -13,18 +13,63 @@ const TIMEOUT_MS = 8000;
 const MAX_BODY = 512 * 1024;
 const MAX_REDIRECTS = 5;
 
-// Expected first fixed release per supported branch (emergency release of
-// 21 Oct 2026). These come from third-party reporting ahead of the official
-// php.net advisory. Confirm them against https://www.php.net/ and update here.
-const FIXED = { "8.2": "8.2.35", "8.3": "8.3.36", "8.4": "8.4.27", "8.5": "8.5.12" };
+// The php2shell fix floor: the first release on each branch that contains the
+// CVE-2026-109618/109619 fix. Used to flag the critical RCE specifically, and
+// as the offline fallback if php.net can't be reached. Confirm at php.net.
+const PHP2SHELL_FIXED = { "8.2": "8.2.35", "8.3": "8.3.36", "8.4": "8.4.27", "8.5": "8.5.12" };
+
 const ADVISORY = {
   name: "php2shell",
   cves: ["CVE-2026-109618", "CVE-2026-109619"],
   cvss: "9.2 (CVSS v4.0)",
   impact: "Unauthenticated remote code execution",
-  affected: "PHP 5 onwards (per CERT-EU; official version list pending)",
+  affected: "PHP 5 onwards (per CERT-EU)",
   updated: "2026-10-21",
 };
+
+// ---------- live PHP release data (php.net) ----------
+//
+// php.net publishes the currently-supported branches and their latest release
+// as JSON. We cache it for a day so the tool is never stale and we don't need
+// to hand-edit version numbers. If the fetch fails we fall back to the
+// php2shell floor above, so the tool still works offline.
+const RELEASES_URL = process.env.RELEASES_URL || "https://www.php.net/releases/active.php?json";
+const RELEASES_TTL = 24 * 60 * 60 * 1000;
+let releaseCache = { at: 0, data: null };
+
+async function getSupportedReleases() {
+  if (releaseCache.data && Date.now() - releaseCache.at < RELEASES_TTL) {
+    return releaseCache.data;
+  }
+  try {
+    const res = await fetch(RELEASES_URL, {
+      signal: AbortSignal.timeout(TIMEOUT_MS),
+      headers: { "User-Agent": "php-risk-check/1.0" },
+    });
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    const raw = await res.json();
+    // Shape: { "8": { "8.3": { "version": "8.3.12", ... }, ... }, ... }
+    const latest = {};
+    for (const major of Object.values(raw)) {
+      for (const [branch, info] of Object.entries(major)) {
+        if (info && info.version) latest[branch] = info.version;
+      }
+    }
+    if (Object.keys(latest).length === 0) throw new Error("empty release list");
+    // Never let live data regress below the known php2shell fix.
+    for (const [branch, floor] of Object.entries(PHP2SHELL_FIXED)) {
+      if (!latest[branch] || cmpVersion(latest[branch], floor) < 0) latest[branch] = floor;
+    }
+    releaseCache = { at: Date.now(), data: { latest, live: true } };
+    return releaseCache.data;
+  } catch (e) {
+    // Fall back to the hardcoded floor; mark it as not live so callers can say so.
+    const fallback = { latest: { ...PHP2SHELL_FIXED }, live: false };
+    // Cache the fallback briefly so a flaky network doesn't fetch on every request.
+    releaseCache = { at: Date.now() - RELEASES_TTL + 5 * 60 * 1000, data: fallback };
+    return fallback;
+  }
+}
 
 // ---------- SSRF guard: only scan public internet hosts ----------
 
@@ -242,11 +287,34 @@ function behindCdn(hops) {
   return null;
 }
 
-function assess(det, cdn) {
+// Is this branch still getting security support? <= 8.1 is end-of-life as of
+// late 2026; live php.net data refines the upper boundary for newer branches.
+function branchStatus(major, minor, releases) {
+  if (major < 8 || (major === 8 && minor <= 1)) return "eol";
+  const branch = `${major}.${minor}`;
+  if (releases.latest[branch]) return "supported";
+  if (releases.live) {
+    // Live data lists every supported branch. Not listed and newer than all
+    // known branches => a release we don't know yet (treat as current).
+    const minors = Object.keys(releases.latest)
+      .filter((b) => b.startsWith("8."))
+      .map((b) => Number(b.split(".")[1]));
+    const maxKnown = minors.length ? Math.max(...minors) : 5;
+    return minor > maxKnown ? "future" : "eol";
+  }
+  // Offline fallback only knows the affected branches; assume newer is current.
+  return minor > 5 ? "future" : "eol";
+}
+
+function assess(det, cdn, releases) {
   const v = det.version;
+  const liveNote = releases.live
+    ? null
+    : "We couldn't reach php.net for the latest version list, so we used the built-in list from 21 October 2026. It may be out of date.";
   const cdnNote = cdn
     ? `The site is behind ${cdn}. Some CDNs/WAFs have pushed emergency rules, but those are not a substitute for patching.`
     : null;
+  const base = (extra = []) => [...extra, liveNote, cdnNote].filter(Boolean);
 
   if (!det.usesPhp) {
     return {
@@ -257,9 +325,9 @@ function assess(det, cdn) {
         "We found no public sign that this site runs PHP. Many sites hide it, though, so this is not proof. If you aren't sure what your site is built on, ask your developer or hosting company.",
       actions: [
         "Confirm with your host or developer that no PHP runs on this server (including admin panels, contact forms or subdomains).",
-        "If PHP does run, upgrade it to the patched release as soon as possible.",
+        "If PHP does run, keep it on a current, supported release.",
       ],
-      notes: [cdnNote].filter(Boolean),
+      notes: base(),
     };
   }
 
@@ -270,95 +338,107 @@ function assess(det, cdn) {
       level: "high",
       verdict: "Patch today. If you can't, take the site offline",
       headline: `Runs PHP${platformBit}, but the version is hidden`,
+      confidence: "low",
       summary:
-        "This site runs PHP, but it hides the version number, so we can't tell whether it is patched. Until you have confirmed it, treat it as vulnerable. CERT-EU says all versions from PHP 5 onward may be affected.",
+        "This site runs PHP, but it hides the version number, so we can't tell whether it is patched. Until you have confirmed it, treat it as vulnerable. CERT-EU says all versions from PHP 5 onward may be affected by php2shell.",
       actions: [
         "Ask your hosting company or developer which PHP version is running and whether it includes the 21 October 2026 security fix.",
-        `Upgrade to a patched release: ${Object.values(FIXED).join(", ")} or newer.`,
-        "If you can't patch quickly, CERT-EU advises taking the site offline until you can.",
-        "Interim hardening only (not a fix): set session.upload_progress.enabled = 0 and session.use_strict_mode = 1.",
+        `Make sure it's on a current release: ${Object.values(releases.latest).join(", ")} or newer.`,
+        "If you can't confirm quickly, CERT-EU advises taking the site offline until you can.",
       ],
-      notes: [cdnNote].filter(Boolean),
+      notes: base(),
     };
   }
 
   const branch = `${v.major}.${v.minor}`;
-  const fixed = FIXED[branch];
   const label = `PHP ${v.raw}${platformBit}`;
+  const status = branchStatus(v.major, v.minor, releases);
+  const latest = releases.latest[branch];
+  const floor = PHP2SHELL_FIXED[branch];
+  const full = v.patch != null ? `${v.major}.${v.minor}.${v.patch}` : null;
+  const vulnPhp2shell = floor && full && cmpVersion(full, floor) < 0;
+  const outdated = latest && full && cmpVersion(full, latest) < 0;
+  const confidence = full ? "high" : "medium";
 
-  if (!fixed) {
-    const tooNew = v.major > 8 || (v.major === 8 && v.minor > 5);
-    if (tooNew) {
-      return {
-        level: "low",
-        verdict: "Safe to keep online",
-        headline: `${label}: newer than the affected branches`,
-        summary: "This version is newer than the branches in the advisory. Keep it updated.",
-        actions: ["Keep applying PHP security releases as they come out."],
-        notes: [cdnNote].filter(Boolean),
-      };
-    }
+  if (status === "eol") {
     return {
       level: "critical",
       verdict: "Take offline, or upgrade now",
-      headline: `${label}: end-of-life, no fix is coming`,
-      summary: `PHP ${branch} no longer receives security updates and will not get a fix for these flaws. The site is exposed to unauthenticated remote code execution, which means attackers could take over the server.`,
+      headline: `${label}: end-of-life`,
+      confidence,
+      summary: `PHP ${branch} no longer receives security updates. It will not get a fix for php2shell or any future flaw, so the server is exposed to unauthenticated remote code execution.`,
       actions: [
         "Take the site offline, or put it into maintenance mode, until PHP is upgraded.",
-        `Upgrade to a supported branch (8.2 or newer) on a patched release: ${Object.values(FIXED).join(", ")} or newer.`,
-        "Test your site on the new version before you bring it back online. Old plugins and themes can break.",
+        `Upgrade to a supported branch on a current release: ${Object.values(releases.latest).join(", ")} or newer.`,
+        "Test your site on the new version before bringing it back online. Old plugins and themes can break.",
         "Check the server for signs of compromise: unknown files, new admin users, web processes spawning shells.",
       ],
-      notes: [
-        "Some Linux distributions (for example RHEL or Debian LTS) backport security fixes to older PHP. If your host does this, the version number can look old even though the fix is in. Confirm with your host.",
-        cdnNote,
-      ].filter(Boolean),
+      notes: base([
+        "Some Linux distributions (RHEL, Debian LTS) backport fixes to old PHP, so the version can look EOL but still be supported. Confirm with your host.",
+      ]),
     };
   }
 
-  if (v.patch == null) {
+  if (vulnPhp2shell) {
+    return {
+      level: "high",
+      verdict: "Patch today. If you can't, take the site offline",
+      headline: `${label}: vulnerable to php2shell`,
+      confidence,
+      summary: `This is older than ${floor}, the release that fixes php2shell on PHP ${branch}. It is exposed to unauthenticated remote code execution.`,
+      actions: [
+        `Upgrade PHP to ${latest || floor} or newer today. Most hosts let you do this from the control panel, or will do it if you ask.`,
+        "If you can't patch quickly, CERT-EU advises taking the site offline until you can.",
+        "Interim hardening only (not a fix): set session.upload_progress.enabled = 0 and session.use_strict_mode = 1, then restart PHP-FPM.",
+        "After patching, check for signs of compromise: unknown files, new admin users, web processes spawning shells.",
+      ],
+      notes: base([
+        "Your host may backport fixes without changing the version number. If they say you're patched, ask them to confirm it in writing.",
+      ]),
+    };
+  }
+
+  if (!full) {
     return {
       level: "high",
       verdict: "Check your exact version",
       headline: `${label}: patch level unknown`,
-      summary: `This branch is fixed in ${fixed}. We couldn't see the exact patch number.`,
+      confidence: "low",
+      summary: `We can see the ${branch} branch but not the exact release. The current release is ${latest || floor}.`,
       actions: [
-        `Confirm the server runs ${fixed} or newer.`,
-        "If it doesn't, and you can't patch quickly, take the site offline.",
+        `Confirm the server runs ${latest || floor} or newer.`,
+        "If it's behind and you can't update quickly, take the site offline.",
       ],
-      notes: [cdnNote].filter(Boolean),
+      notes: base(),
     };
   }
 
-  if (cmpVersion(`${v.major}.${v.minor}.${v.patch}`, fixed) >= 0) {
+  if (outdated) {
     return {
-      level: "low",
-      verdict: "Safe to keep online",
-      headline: `${label}: patched`,
-      summary: `This version is at or above ${fixed}, the release that fixes php2shell on the ${branch} branch.`,
+      level: "medium",
+      verdict: "Update available — plan an upgrade",
+      headline: `${label}: patched against php2shell, but out of date`,
+      confidence,
+      summary: `This is safe from php2shell, but PHP ${branch} has since moved on to ${latest}. Older releases miss later security fixes, so update when you can.`,
       actions: [
-        "No emergency action needed for php2shell.",
-        "Hide the version header (expose_php = Off in php.ini) so attackers can't fingerprint your server.",
+        `Update PHP to ${latest} to pick up the latest security fixes.`,
+        "This isn't an emergency for php2shell, but don't leave it for months.",
       ],
-      notes: [cdnNote].filter(Boolean),
+      notes: base(),
     };
   }
 
   return {
-    level: "high",
-    verdict: "Patch today. If you can't, take the site offline",
-    headline: `${label}: vulnerable`,
-    summary: `This version is older than ${fixed}, the fixed release for PHP ${branch}. It is exposed to unauthenticated remote code execution.`,
+    level: "low",
+    verdict: "Safe to keep online",
+    headline: `${label}: up to date`,
+    confidence,
+    summary: `This is the current release for PHP ${branch}${latest ? ` (${latest})` : ""}, and it includes the php2shell fix.`,
     actions: [
-      `Upgrade PHP to ${fixed} or newer today. Most hosts let you do this from the control panel, or will do it if you ask.`,
-      "If you can't patch quickly, CERT-EU advises taking the site offline until you can.",
-      "Interim hardening only (not a fix): set session.upload_progress.enabled = 0 and session.use_strict_mode = 1, then restart PHP-FPM.",
-      "After patching, check for signs of compromise: unknown files, new admin users, web processes spawning shells.",
+      "No action needed right now. Keep applying PHP updates as they're released.",
+      "Hide the version header (expose_php = Off in php.ini) so attackers can't fingerprint your server.",
     ],
-    notes: [
-      "Your host may backport fixes without changing the version number. If they say you're patched, ask them to confirm it in writing.",
-      cdnNote,
-    ].filter(Boolean),
+    notes: base(),
   };
 }
 
@@ -405,6 +485,7 @@ async function scan(input) {
 
   const det = detectPhp(main, probes);
   const cdn = behindCdn(main.hops);
+  const releases = await getSupportedReleases();
   return {
     url: main.finalUrl,
     scannedAt: new Date().toISOString(),
@@ -414,8 +495,13 @@ async function scan(input) {
       cdn,
       pathsChecked: probePaths.length + 1,
     },
-    assessment: assess(det, cdn),
-    advisory: { ...ADVISORY, fixedVersions: FIXED },
+    assessment: assess(det, cdn, releases),
+    advisory: {
+      ...ADVISORY,
+      php2shellFixed: PHP2SHELL_FIXED,
+      currentReleases: releases.latest,
+      versionsLive: releases.live,
+    },
   };
 }
 

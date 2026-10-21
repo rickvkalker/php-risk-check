@@ -15,44 +15,60 @@
  * Confirm against https://www.php.net/ and edit if they differ.
  */
 
-$FIXED = ['8.2' => '8.2.35', '8.3' => '8.3.36', '8.4' => '8.4.27', '8.5' => '8.5.12'];
+// php2shell fix floor per branch (fallback / RCE floor). Confirm at php.net.
+$FLOOR = ['8.2' => '8.2.35', '8.3' => '8.3.36', '8.4' => '8.4.27', '8.5' => '8.5.12'];
+
+// Try to fetch the current release per branch live from php.net, so this also
+// catches generally out-of-date PHP, not just php2shell. Falls back to $FLOOR.
+$latest = $FLOOR;
+$live = false;
+$json = @file_get_contents('https://www.php.net/releases/active.php?json');
+if ($json !== false) {
+    $data = json_decode($json, true);
+    if (is_array($data)) {
+        foreach ($data as $major) {
+            if (!is_array($major)) continue;
+            foreach ($major as $b => $info) {
+                if (!empty($info['version'])) $latest[$b] = $info['version'];
+            }
+        }
+        foreach ($FLOOR as $b => $f) {
+            if (!isset($latest[$b]) || version_compare($latest[$b], $f, '<')) $latest[$b] = $f;
+        }
+        $live = true;
+    }
+}
 
 $v = PHP_VERSION;                 // e.g. "8.3.30"
 $branch = PHP_MAJOR_VERSION . '.' . PHP_MINOR_VERSION;
 $sapi = PHP_SAPI;                 // fpm-fcgi, apache2handler, cgi-fcgi, cli...
 
+$eol = (PHP_MAJOR_VERSION < 8 || $branch === '8.0' || $branch === '8.1');
 $status = 'unknown';
 $headline = '';
 $detail = '';
 
-if (PHP_MAJOR_VERSION < 8 || ($branch === '8.0' || $branch === '8.1')) {
+if ($eol) {
     $status = 'critical';
     $headline = "PHP $v is end-of-life";
-    $detail = "This branch no longer gets security fixes, so it will NOT be patched for php2shell. "
-            . "Upgrade to a supported branch (8.2+) or take the site offline.";
-} elseif (!isset($FIXED[$branch])) {
-    if (version_compare($v, '8.5.0', '>=')) {
-        $status = 'ok';
-        $headline = "PHP $v is newer than the affected branches";
-        $detail = "Keep applying security releases as normal.";
-    } else {
-        $status = 'critical';
-        $headline = "PHP $v is end-of-life";
-        $detail = "No fix is coming for this branch. Upgrade to 8.2+ or take the site offline.";
-    }
-} elseif (version_compare($v, $FIXED[$branch], '>=')) {
-    $status = 'ok';
-    $headline = "PHP $v is patched";
-    $detail = "This is at or above $FIXED[$branch], the fixed release for the $branch branch. "
-            . "Note: if your Linux distribution backports fixes, the number may stay the same "
-            . "but still include the fix -- this check trusts the running version.";
-} else {
+    $detail = "This branch no longer gets security fixes, so it will NOT be patched for php2shell "
+            . "or future flaws. Upgrade to a supported branch (8.2+) or take the site offline.";
+} elseif (isset($FLOOR[$branch]) && version_compare($v, $FLOOR[$branch], '<')) {
     $status = 'vulnerable';
-    $headline = "PHP $v is VULNERABLE";
-    $detail = "The fixed release for $branch is $FIXED[$branch]. Upgrade today, or take the site "
-            . "offline until you can. IMPORTANT: your distro may have backported the fix without "
-            . "changing the version number -- if you applied updates today, confirm with your host "
-            . "before assuming you're exposed.";
+    $headline = "PHP $v is VULNERABLE to php2shell";
+    $detail = "The php2shell fix for $branch is $FLOOR[$branch]. Upgrade today, or take the site "
+            . "offline until you can. NOTE: your distro may have backported the fix without changing "
+            . "the version number -- if you applied updates today, confirm with your host first.";
+} elseif (isset($latest[$branch]) && version_compare($v, $latest[$branch], '<')) {
+    $status = 'outdated';
+    $headline = "PHP $v is safe from php2shell, but out of date";
+    $detail = "The current release for $branch is {$latest[$branch]}. You're past the php2shell fix, "
+            . "but older releases miss later security fixes. Plan an upgrade -- not an emergency.";
+} else {
+    $status = 'ok';
+    $headline = "PHP $v is up to date";
+    $detail = "This is the current release for the $branch branch and includes the php2shell fix. "
+            . "If your Linux distribution backports fixes, the number may differ but still be current.";
 }
 
 // Interim hardening settings (not a fix, but reduce exposure).
@@ -60,8 +76,8 @@ $uploadProgress = ini_get('session.upload_progress.enabled');
 $strictMode = ini_get('session.use_strict_mode');
 $exposePhp = ini_get('expose_php');
 
-$colors = ['ok' => '#067647', 'vulnerable' => '#b54708', 'critical' => '#b42318', 'unknown' => '#6b6a66'];
-$labels = ['ok' => 'PATCHED', 'vulnerable' => 'VULNERABLE', 'critical' => 'CRITICAL', 'unknown' => 'UNKNOWN'];
+$colors = ['ok' => '#067647', 'outdated' => '#9a6700', 'vulnerable' => '#b54708', 'critical' => '#b42318', 'unknown' => '#6b6a66'];
+$labels = ['ok' => 'UP TO DATE', 'outdated' => 'UPDATE AVAILABLE', 'vulnerable' => 'VULNERABLE', 'critical' => 'CRITICAL', 'unknown' => 'UNKNOWN'];
 $c = $colors[$status];
 
 header('Content-Type: text/html; charset=utf-8');
@@ -88,7 +104,8 @@ header('Content-Type: text/html; charset=utf-8');
     <table>
       <tr><td>PHP version</td><td><code><?= htmlspecialchars($v) ?></code></td></tr>
       <tr><td>Branch</td><td><code><?= htmlspecialchars($branch) ?></code></td></tr>
-      <tr><td>Fixed release for branch</td><td><code><?= htmlspecialchars($FIXED[$branch] ?? 'n/a (EOL)') ?></code></td></tr>
+      <tr><td>php2shell fix for branch</td><td><code><?= htmlspecialchars($FLOOR[$branch] ?? 'n/a (EOL)') ?></code></td></tr>
+      <tr><td>Current release for branch</td><td><code><?= htmlspecialchars($latest[$branch] ?? 'n/a (EOL)') ?></code><?= $live ? '' : ' <span style="color:#9a6700">(offline list)</span>' ?></td></tr>
       <tr><td>Server interface (SAPI)</td><td><code><?= htmlspecialchars($sapi) ?></code></td></tr>
       <tr><td>session.upload_progress.enabled</td><td><?= $uploadProgress ? '<span class="warn">on</span>' : 'off' ?></td></tr>
       <tr><td>session.use_strict_mode</td><td><?= $strictMode ? 'on' : '<span class="warn">off</span>' ?></td></tr>

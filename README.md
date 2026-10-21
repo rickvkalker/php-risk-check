@@ -7,7 +7,8 @@ Run: `node server.js` (Node 18+, no dependencies), then open http://localhost:30
 The check is passive. It requests the homepage and `/index.php`, then reads the `X-Powered-By`/`Server` headers, `PHPSESSID` cookies and CMS fingerprints.
 It blocks private/internal addresses (SSRF guard) and limits each IP to 10 checks per minute.
 
-Update `FIXED` in `server.js` once php.net publishes the official fixed versions.
+The current release list is fetched live from php.net (cached 24h) and falls back to the built-in
+`PHP2SHELL_FIXED` snapshot if php.net is unreachable. Keep that snapshot roughly current as a floor.
 
 ## Two levels of check
 

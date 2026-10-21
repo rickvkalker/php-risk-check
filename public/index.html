@@ -3,13 +3,14 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>PHP Risk Check</title>
+<title>PHP Security Check</title>
 <style>
   :root {
     --bg: #f6f5f2; --surface: #ffffff; --text: #1d1d1b; --muted: #6b6a66; --border: #e3e1dc;
     --accent: #3b5bdb; --accent-text: #ffffff;
     --crit: #b42318; --crit-bg: #fdecea;
     --high: #b54708; --high-bg: #fef3e2;
+    --med: #9a6700; --med-bg: #fdf6e3;
     --low: #067647; --low-bg: #e8f5ee;
   }
   @media (prefers-color-scheme: dark) {
@@ -18,6 +19,7 @@
       --accent: #7b93f0; --accent-text: #0f1220;
       --crit: #f97066; --crit-bg: #3a1714;
       --high: #fdb022; --high-bg: #35260c;
+      --med: #e3b341; --med-bg: #2b2410;
       --low: #47cd89; --low-bg: #0f2a1c;
     }
   }
@@ -48,8 +50,10 @@
   .verdict .lvl { font-size: 13px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; color: var(--c); }
   .verdict h2 { margin: 4px 0 6px; font-size: 24px; line-height: 1.2; }
   .verdict p { margin: 0; }
+  .verdict .conf { font-size: 12px; font-weight: 600; color: var(--muted); margin-top: 8px; }
   .critical { --c: var(--crit); --cbg: var(--crit-bg); }
   .high { --c: var(--high); --cbg: var(--high-bg); }
+  .medium { --c: var(--med); --cbg: var(--med-bg); }
   .low { --c: var(--low); --cbg: var(--low-bg); }
   h3 { font-size: 15px; margin: 22px 0 8px; }
   h3:first-child { margin-top: 0; }
@@ -65,10 +69,9 @@
 </head>
 <body>
 <main>
-  <p class="eyebrow">php2shell · CVE-2026-109618 / 109619</p>
-  <h1>Is your website at risk from the PHP flaws?</h1>
-  <p class="hint" style="margin:0 0 12px">Last updated: 21 October 2026</p>
-  <p class="lede">CERT-EU warns that sites which can't be patched may need to go offline. Enter your website and we'll tell you how exposed it looks and what to do.</p>
+  <p class="eyebrow">PHP security check · php2shell (CVE-2026-109618 / 109619)</p>
+  <h1>Is your website's PHP safe and up to date?</h1>
+  <p class="lede">We check whether your site runs an out-of-date or vulnerable version of PHP — including the critical php2shell flaw CERT-EU warns about — and tell you what to do. Version data comes live from php.net.</p>
 
   <form id="f">
     <input id="u" type="text" inputmode="url" autocomplete="url" placeholder="example.com" aria-label="Website address" required>
@@ -79,8 +82,7 @@
   <div id="out" aria-live="polite"></div>
 
   <footer>
-    This tool gives an indication, not a guarantee. It can't see PHP versions that are hidden, and hosts sometimes backport fixes without changing the version number. When in doubt, ask your hosting company.
-    Fixed version numbers come from reporting ahead of the official advisory. Check <a href="https://www.php.net/" rel="noopener">php.net</a>.
+    This tool gives an indication, not a guarantee. It can't see PHP versions that are hidden, and hosts sometimes backport fixes without changing the version number. When in doubt, ask your hosting company or check <a href="https://www.php.net/" rel="noopener">php.net</a>.
   </footer>
 </main>
 
@@ -90,7 +92,12 @@ const u = document.getElementById("u");
 const b = document.getElementById("b");
 const out = document.getElementById("out");
 
-const LEVEL = { critical: "Critical risk", high: "High risk", low: "Low risk" };
+const LEVEL = { critical: "Critical risk", high: "High risk", medium: "Update available", low: "Low risk" };
+const CONF = {
+  high: "Based on the exact version your site reports.",
+  medium: "Based on the PHP branch your site reports; exact release not seen.",
+  low: "We couldn't read a version — treat this as a guess until you confirm.",
+};
 
 function el(tag, attrs = {}, ...kids) {
   const n = document.createElement(tag);
@@ -119,12 +126,14 @@ function render(r) {
   const meta = el("p", { class: "meta" }, where + "scanned ", el("code", {}, r.url), " at " + new Date(r.scannedAt).toLocaleString());
   card.append(meta);
 
-  out.replaceChildren(
-    el("div", { class: "verdict " + a.level },
-      el("div", { class: "lvl" }, LEVEL[a.level]),
-      el("h2", {}, a.verdict),
-      el("p", {}, el("strong", {}, a.headline + ". "), a.summary)),
-    card);
+  const verdict = el("div", { class: "verdict " + a.level },
+    el("div", { class: "lvl" }, LEVEL[a.level] || a.level),
+    el("h2", {}, a.verdict),
+    el("p", {}, el("strong", {}, a.headline + ". "), a.summary));
+  if (a.confidence && CONF[a.confidence]) {
+    verdict.append(el("p", { class: "conf" }, "Confidence: " + CONF[a.confidence]));
+  }
+  out.replaceChildren(verdict, card);
 }
 
 f.addEventListener("submit", async (e) => {
