@@ -74,7 +74,7 @@
     <input id="u" type="text" inputmode="url" autocomplete="url" placeholder="example.com" aria-label="Website address" required>
     <button id="b" type="submit">Check site</button>
   </form>
-  <p class="hint">Passive check: we load your homepage and <code>/index.php</code> and read the public headers. Nothing is attacked.</p>
+  <p class="hint">Passive check: we load a few standard pages on your site and read what they reveal. Nothing is attacked. For a definite answer, <a href="/self-check">run the self-check on your own server</a>.</p>
 
   <div id="out" aria-live="polite"></div>
 
@@ -104,9 +104,19 @@ function render(r) {
   const a = r.assessment, d = r.detection;
   const card = el("div", { class: "card" });
   card.append(el("h3", {}, "What to do"), list("ol", a.actions));
-  if (d.evidence.length) card.append(el("h3", {}, "What we found"), list("ul", d.evidence));
+  const found = [...d.evidence];
+  if (d.webServer) found.push("Web server: " + d.webServer);
+  if (found.length) card.append(el("h3", {}, "What we found"), list("ul", found));
+
+  // Every result points to the definitive on-server check.
+  card.append(
+    el("h3", {}, "Want certainty?"),
+    el("p", {}, "This check can be wrong when a site hides its version or a host backports fixes. To know for sure, ",
+      el("a", { href: "/self-check" }, "run the self-check on your server"), "."));
+
   if (a.notes.length) card.append(el("h3", {}, "Good to know"), list("ul", a.notes));
-  const meta = el("p", { class: "meta" }, "Checked ", el("code", {}, r.url), " at " + new Date(r.scannedAt).toLocaleString());
+  const where = d.pathsChecked ? `${d.pathsChecked} pages checked · ` : "";
+  const meta = el("p", { class: "meta" }, where + "scanned ", el("code", {}, r.url), " at " + new Date(r.scannedAt).toLocaleString());
   card.append(meta);
 
   out.replaceChildren(

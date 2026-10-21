@@ -148,11 +148,25 @@ function cmpVersion(a, b) {
   return 0;
 }
 
-function detectPhp(main, probe) {
+function detectWebServer(hops) {
+  for (const h of hops) {
+    const s = h.headers.get("server") || "";
+    if (/litespeed/i.test(s)) return "LiteSpeed";
+    if (/apache/i.test(s)) return "Apache";
+    if (/nginx/i.test(s)) return "nginx";
+    if (/caddy/i.test(s)) return "Caddy";
+    if (/microsoft-iis/i.test(s)) return "IIS";
+    if (/openresty/i.test(s)) return "OpenResty";
+  }
+  return null;
+}
+
+function detectPhp(main, probes) {
+  const probeList = Array.isArray(probes) ? probes : probes ? [probes] : [];
   const evidence = [];
   let version = null;
 
-  const allHops = [...main.hops, ...(probe ? probe.hops : [])];
+  const allHops = [...main.hops, ...probeList.flatMap((p) => p.hops)];
   for (const h of allHops) {
     const xpb = h.headers.get("x-powered-by");
     const server = h.headers.get("server");
@@ -166,9 +180,23 @@ function detectPhp(main, probe) {
     if (cookies.some((c) => /^PHPSESSID=/i.test(c))) evidence.push("PHPSESSID session cookie set");
   }
 
+  // PHP versions also leak in the body of error/default pages (e.g. a 404 or a
+  // PHP error footer). Scan every retrieved body for a "PHP/x.y.z" string.
+  for (const doc of [main, ...probeList]) {
+    const found = parsePhpVersion(doc.body || "");
+    if (found) {
+      version = version || found;
+      evidence.push(`PHP version in page content: "${found.raw}"`);
+    }
+  }
+
+  const webServer = detectWebServer(allHops);
   const html = main.body || "";
-  const gen = /<meta[^>]+name=["']generator["'][^>]+content=["']([^"']+)["']/i.exec(html)
-    || /<meta[^>]+content=["']([^"']+)["'][^>]+name=["']generator["']/i.exec(html);
+  // Combined body text (homepage + all probe pages) for fingerprinting.
+  const allBodies = [html, ...probeList.map((p) => p.body || "")].join("\n");
+
+  const gen = /<meta[^>]+name=["']generator["'][^>]+content=["']([^"']+)["']/i.exec(allBodies)
+    || /<meta[^>]+content=["']([^"']+)["'][^>]+name=["']generator["']/i.exec(allBodies);
   const platforms = [
     [/wordpress/i, "WordPress"], [/drupal/i, "Drupal"], [/joomla/i, "Joomla"],
     [/typo3/i, "TYPO3"], [/magento/i, "Magento"], [/prestashop/i, "PrestaShop"],
@@ -178,24 +206,30 @@ function detectPhp(main, probe) {
     for (const [re, name] of platforms) if (re.test(gen[1])) platform = name;
     if (platform) evidence.push(`Site generator: "${gen[1]}"`);
   }
-  if (!platform && /\/wp-(content|includes)\//i.test(html)) {
-    platform = "WordPress";
-    evidence.push("WordPress asset paths (/wp-content/) in page");
+  // Framework / app fingerprints found anywhere across the fetched pages.
+  const fingerprints = [
+    [/\/wp-(content|includes)\/|wp-login\.php/i, "WordPress", "WordPress files/paths"],
+    [/\/sites\/(default|all)\/(files|modules|themes)\//i, "Drupal", "Drupal asset paths"],
+    [/Mage\.Cookies|\/static\/version\d+\/frontend\//i, "Magento", "Magento asset paths"],
+    [/option=com_|Joomla!/i, "Joomla", "Joomla paths"],
+    [/laravel_session|\/vendor\/laravel\//i, "Laravel", "Laravel framework"],
+    [/_sf2_|\/bundles\/framework\//i, "Symfony", "Symfony framework"],
+    [/phpbb|style_cookiesettings/i, "phpBB", "phpBB forum"],
+    [/Nextcloud|data-requesttoken/i, "Nextcloud", "Nextcloud"],
+    [/MediaWiki/i, "MediaWiki", "MediaWiki"],
+  ];
+  for (const [re, name, why] of fingerprints) {
+    if (!platform && re.test(allBodies)) {
+      platform = name;
+      evidence.push(`${why} detected`);
+    }
   }
-  if (!platform && /\/sites\/(default|all)\/(files|modules|themes)\//i.test(html)) {
-    platform = "Drupal";
-    evidence.push("Drupal asset paths in page");
-  }
-  if (!platform && /Mage\.Cookies|\/static\/version\d+\/frontend\//i.test(html)) {
-    platform = "Magento";
-    evidence.push("Magento asset paths in page");
-  }
-  if (/(href|action|src)=["'][^"']*\.php(\?|["'#])/i.test(html)) {
+  if (/(href|action|src)=["'][^"']*\.php(\?|["'#])/i.test(allBodies)) {
     evidence.push("Page links to .php files");
   }
   // De-duplicate (cookies and headers can repeat across redirect hops).
   const unique = [...new Set(evidence)];
-  return { usesPhp: unique.length > 0, version, platform, evidence: unique };
+  return { usesPhp: unique.length > 0, version, platform, webServer, evidence: unique };
 }
 
 function behindCdn(hops) {
@@ -349,19 +383,37 @@ async function scan(input) {
     }
   }
 
-  let probe = null;
-  try {
-    probe = await safeGet(new URL("/index.php", main.finalUrl).href);
-  } catch {
-    // A failed probe is not significant.
-  }
+  // Standard, benign paths that commonly leak a PHP version or confirm a PHP
+  // app. These are ordinary GET requests to well-known public URLs — no
+  // payloads, nothing exploit-like. A random path triggers a 404 page, which
+  // often carries the Server/X-Powered-By version banner.
+  const probePaths = [
+    "/index.php",
+    "/wp-login.php",
+    "/administrator/",
+    "/user/login",
+    "/robots.txt",
+    "/php2shell-check-" + Math.random().toString(36).slice(2, 10),
+  ];
+  const probes = (
+    await Promise.all(
+      probePaths.map((p) =>
+        safeGet(new URL(p, main.finalUrl).href).catch(() => null)
+      )
+    )
+  ).filter(Boolean);
 
-  const det = detectPhp(main, probe);
+  const det = detectPhp(main, probes);
   const cdn = behindCdn(main.hops);
   return {
     url: main.finalUrl,
     scannedAt: new Date().toISOString(),
-    detection: { ...det, version: det.version ? det.version.raw : null, cdn },
+    detection: {
+      ...det,
+      version: det.version ? det.version.raw : null,
+      cdn,
+      pathsChecked: probePaths.length + 1,
+    },
     assessment: assess(det, cdn),
     advisory: { ...ADVISORY, fixedVersions: FIXED },
   };
@@ -369,7 +421,19 @@ async function scan(input) {
 
 // ---------- HTTP server ----------
 
-const INDEX = path.join(__dirname, "public", "index.html");
+const PUBLIC = path.join(__dirname, "public");
+const INDEX = path.join(PUBLIC, "index.html");
+
+// Static files we serve by name. The .php script is served as plain text so the
+// browser shows/saves the source rather than trying to execute it.
+const STATIC = {
+  "/self-check": { file: "self-check.html", type: "text/html; charset=utf-8" },
+  "/php2shell-selfcheck.php": {
+    file: "php2shell-selfcheck.php",
+    type: "text/plain; charset=utf-8",
+    download: true,
+  },
+};
 
 // Simple per-IP rate limit so the checker can't be used as a scanner farm.
 const hits = new Map();
@@ -392,6 +456,14 @@ http
     if (req.method === "GET" && url.pathname === "/") {
       res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
       fs.createReadStream(INDEX).pipe(res);
+      return;
+    }
+    if (req.method === "GET" && STATIC[url.pathname]) {
+      const s = STATIC[url.pathname];
+      const headers = { "Content-Type": s.type };
+      if (s.download) headers["Content-Disposition"] = `attachment; filename="${s.file}"`;
+      res.writeHead(200, headers);
+      fs.createReadStream(path.join(PUBLIC, s.file)).pipe(res);
       return;
     }
     if (req.method === "GET" && url.pathname === "/api/scan") {

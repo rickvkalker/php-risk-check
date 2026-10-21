@@ -8,3 +8,14 @@ The check is passive. It requests the homepage and `/index.php`, then reads the 
 It blocks private/internal addresses (SSRF guard) and limits each IP to 10 checks per minute.
 
 Update `FIXED` in `server.js` once php.net publishes the official fixed versions.
+
+## Two levels of check
+
+1. **Quick check (`/`)** — passive. Loads several standard pages (homepage, `/index.php`,
+   `/wp-login.php`, `/administrator/`, `/user/login`, a 404 page) and reads the PHP version,
+   session cookie, web server and CMS from the responses. Never sends anything exploit-like.
+2. **Self-check (`/self-check`)** — definitive. Serves `php2shell-selfcheck.php` for the site
+   owner to upload to their own server; it reads the local PHP version and php.ini settings
+   and reports Patched / Vulnerable / Critical.
+
+The self-check PHP script shares the `FIXED` version list; update both when php.net confirms the numbers.

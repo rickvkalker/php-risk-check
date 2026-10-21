@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Self-check on your server</title>
+<style>
+  :root { --bg:#f6f5f2; --surface:#fff; --text:#1d1d1b; --muted:#6b6a66; --border:#e3e1dc; --accent:#3b5bdb; --accent-text:#fff; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#141413; --surface:#1e1e1c; --text:#ecebe7; --muted:#a09f9a; --border:#33322f; --accent:#7b93f0; --accent-text:#0f1220; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:16px/1.55 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; }
+  main { max-width:680px; margin:0 auto; padding:48px 16px 64px; }
+  a.back { color:var(--muted); text-decoration:none; font-size:14px; }
+  h1 { font-size:clamp(26px,5vw,34px); line-height:1.15; margin:14px 0 10px; }
+  .lede { color:var(--muted); margin:0 0 24px; }
+  .card { background:var(--surface); border:1px solid var(--border); border-radius:14px; padding:24px; margin-bottom:16px; }
+  h2 { font-size:17px; margin:0 0 10px; }
+  ol { margin:0; padding-left:22px; } li { margin:8px 0; }
+  code { background:rgba(128,128,128,.14); padding:1px 6px; border-radius:4px; font-size:14px; }
+  .btn { display:inline-block; font-weight:600; padding:12px 20px; border-radius:10px; background:var(--accent); color:var(--accent-text); text-decoration:none; }
+  .warn { border-left:4px solid #b54708; padding-left:14px; color:var(--muted); }
+</style>
+</head>
+<body>
+<main>
+  <a class="back" href="/">&larr; Back to the quick check</a>
+  <h1>Check your server directly</h1>
+  <p class="lede">The quick check only sees what your site reveals publicly. For a definite answer, run this small script on your own server. It reads the PHP version and settings locally and tells you if you're patched. It changes nothing and attacks nothing.</p>
+
+  <div class="card">
+    <h2>How to use it</h2>
+    <ol>
+      <li><a class="btn" href="/php2shell-selfcheck.php" download>Download php2shell-selfcheck.php</a></li>
+      <li>Upload it to your website's public folder (where your homepage lives), using FTP, your hosting file manager, or SSH.</li>
+      <li>Open it in your browser: <code>https://yoursite.com/php2shell-selfcheck.php</code></li>
+      <li>Read the verdict: <strong>Patched</strong>, <strong>Vulnerable</strong>, or <strong>Critical</strong>.</li>
+      <li><strong>Delete the file</strong> when you're done.</li>
+    </ol>
+  </div>
+
+  <div class="card">
+    <h2>No upload access? Check another way</h2>
+    <ol>
+      <li>Over SSH, run <code>php -v</code>. The first line shows the version.</li>
+      <li>In cPanel or Plesk, open the PHP version / "Select PHP Version" tool.</li>
+      <li>Then ask your host: <em>"Is the 21 October 2026 PHP security fix (php2shell, CVE-2026-109618/109619) installed?"</em> Some hosts patch without changing the version number, so this question settles it.</li>
+    </ol>
+  </div>
+
+  <div class="card warn">
+    Only run scripts on servers you own or manage. This script is safe to read before you upload it &mdash; open it in a text editor and you'll see it only reads local settings.
+  </div>
+</main>
+</body>
+</html>
