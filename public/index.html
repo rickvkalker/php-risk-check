@@ -61,6 +61,19 @@
   li { margin: 4px 0; }
   .meta { font-size: 14px; color: var(--muted); }
   .meta code { font-size: 13px; }
+  .copybox { position: relative; }
+  .copybox pre {
+    white-space: pre-wrap; word-break: break-word; margin: 0;
+    background: rgba(128,128,128,.10); border: 1px solid var(--border); border-radius: 10px;
+    padding: 16px; font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  .copybtn {
+    position: absolute; top: 10px; right: 10px; padding: 7px 12px; font-size: 13px;
+    border-radius: 8px; background: var(--accent); color: var(--accent-text); border: 0; cursor: pointer;
+  }
+  details.tech { margin-top: 22px; border-top: 1px solid var(--border); padding-top: 12px; }
+  details.tech summary { cursor: pointer; color: var(--muted); font-size: 14px; }
+  details.tech h3 { margin-top: 14px; }
   .err { color: var(--crit); }
   footer { margin-top: 40px; font-size: 13px; color: var(--muted); }
   footer a { color: inherit; }
@@ -107,21 +120,54 @@ function el(tag, attrs = {}, ...kids) {
 }
 function list(tag, items) { return el(tag, {}, ...items.map(t => el("li", {}, t))); }
 
+function copyBlock(text) {
+  const wrap = el("div", { class: "copybox" });
+  const pre = el("pre", {}, text);
+  const btn = el("button", { type: "button", class: "copybtn" }, "Copy message");
+  btn.addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText(text);
+      btn.textContent = "Copied ✓";
+      setTimeout(() => (btn.textContent = "Copy message"), 2000);
+    } catch {
+      // Fallback: select the text so the user can copy manually.
+      const range = document.createRange();
+      range.selectNodeContents(pre);
+      const sel = window.getSelection();
+      sel.removeAllRanges(); sel.addRange(range);
+      btn.textContent = "Press Ctrl/Cmd+C";
+    }
+  });
+  wrap.append(btn, pre);
+  return wrap;
+}
+
 function render(r) {
   const a = r.assessment, d = r.detection;
   const card = el("div", { class: "card" });
   card.append(el("h3", {}, "What to do"), list("ol", a.actions));
-  const found = [...d.evidence];
-  if (d.webServer) found.push("Web server: " + d.webServer);
-  if (found.length) card.append(el("h3", {}, "What we found"), list("ul", found));
 
-  // Every result points to the definitive on-server check.
-  card.append(
-    el("h3", {}, "Want certainty?"),
-    el("p", {}, "This check can be wrong when a site hides its version or a host backports fixes. To know for sure, ",
-      el("a", { href: "/self-check" }, "run the self-check on your server"), "."));
+  // The copy-paste message to send to their host or developer.
+  if (a.contactMessage) {
+    card.append(
+      el("h3", {}, "Message to send to your host or web developer"),
+      el("p", { class: "meta", style: "margin-bottom:10px" }, "Copy this and send it to whoever looks after your website."),
+      copyBlock(a.contactMessage));
+  }
 
   if (a.notes.length) card.append(el("h3", {}, "Good to know"), list("ul", a.notes));
+
+  // Technical detail, collapsed by default to keep the main view simple.
+  const found = [...d.evidence];
+  if (d.webServer) found.push("Web server: " + d.webServer);
+  const details = el("details", { class: "tech" });
+  details.append(el("summary", {}, "Technical details (for your developer)"));
+  if (found.length) details.append(el("h3", {}, "What we found"), list("ul", found));
+  details.append(
+    el("p", {}, "Want to be 100% sure? You can ",
+      el("a", { href: "/self-check" }, "run a definitive check on your own server"),
+      " — handy if your developer wants proof."));
+  card.append(details);
   const where = d.pathsChecked ? `${d.pathsChecked} pages checked · ` : "";
   const meta = el("p", { class: "meta" }, where + "scanned ", el("code", {}, r.url), " at " + new Date(r.scannedAt).toLocaleString());
   card.append(meta);

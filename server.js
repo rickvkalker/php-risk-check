@@ -306,26 +306,48 @@ function branchStatus(major, minor, releases) {
   return minor > 5 ? "future" : "eol";
 }
 
-function assess(det, cdn, releases) {
+// A ready-to-send message the owner can copy and paste to whoever looks after
+// their website (hosting company or developer). This is the main "action you can
+// take right now" for non-technical owners.
+function hostMessage(site, urgent, target) {
+  const safe = Object.values(target).join(", ");
+  if (urgent) {
+    return (
+      `Hi, I'm the owner of ${site}.\n\n` +
+      `I've read that there's a serious security problem in PHP (the software many websites run on) that could let hackers take over websites. Could you please:\n\n` +
+      `1. Check which version of PHP my website is using.\n` +
+      `2. Update it to a safe version (${safe}, or newer) as soon as possible — ideally today.\n` +
+      `3. If it can't be updated today, please take my site offline or put it in maintenance mode until it can.\n\n` +
+      `Please let me know once it's done. Thank you.`
+    );
+  }
+  return (
+    `Hi, I'm the owner of ${site}.\n\n` +
+    `My website is running an older version of PHP. It's not an emergency, but could you update it to the latest version (${safe}, or newer) when you get a chance? Thanks.`
+  );
+}
+
+function assess(det, cdn, releases, siteUrl) {
   const v = det.version;
+  const site = (() => {
+    try { return new URL(siteUrl).hostname; } catch { return "my website"; }
+  })();
   const liveNote = releases.live
     ? null
-    : "We couldn't reach php.net for the latest version list, so we used the built-in list from 21 October 2026. It may be out of date.";
-  const cdnNote = cdn
-    ? `The site is behind ${cdn}. Some CDNs/WAFs have pushed emergency rules, but those are not a substitute for patching.`
-    : null;
-  const base = (extra = []) => [...extra, liveNote, cdnNote].filter(Boolean);
+    : "Note: we couldn't reach php.net to double-check the latest versions, so this is based on our records from 21 October 2026.";
+  const base = (extra = []) => [...extra, liveNote].filter(Boolean);
 
+  // No PHP found.
   if (!det.usesPhp) {
     return {
       level: "low",
-      verdict: "Safe to keep online",
-      headline: "No sign of PHP found",
+      verdict: "Looks fine — no action needed",
+      headline: "We didn't find PHP on your site",
       summary:
-        "We found no public sign that this site runs PHP. Many sites hide it, though, so this is not proof. If you aren't sure what your site is built on, ask your developer or hosting company.",
+        "We couldn't see any sign that your website uses PHP, so this security issue probably doesn't affect you. Some sites hide this, so it's not a guarantee.",
       actions: [
-        "Confirm with your host or developer that no PHP runs on this server (including admin panels, contact forms or subdomains).",
-        "If PHP does run, keep it on a current, supported release.",
+        "You don't need to do anything right now.",
+        "If you're not sure what your website is built with, ask whoever built or hosts it to confirm it doesn't use PHP.",
       ],
       notes: base(),
     };
@@ -333,19 +355,21 @@ function assess(det, cdn, releases) {
 
   const platformBit = det.platform ? ` (${det.platform})` : "";
 
+  // PHP present but version hidden — treat as risky.
   if (!v) {
     return {
       level: "high",
-      verdict: "Patch today. If you can't, take the site offline",
-      headline: `Runs PHP${platformBit}, but the version is hidden`,
+      verdict: "Act today to be safe",
+      headline: `Your site uses PHP${platformBit}, but we couldn't see the version`,
       confidence: "low",
       summary:
-        "This site runs PHP, but it hides the version number, so we can't tell whether it is patched. Until you have confirmed it, treat it as vulnerable. CERT-EU says all versions from PHP 5 onward may be affected by php2shell.",
+        "Your website runs PHP, but it doesn't show which version — so we can't tell if it's safe. Because a serious PHP security issue is going around, it's best to treat it as at-risk until someone confirms otherwise.",
       actions: [
-        "Ask your hosting company or developer which PHP version is running and whether it includes the 21 October 2026 security fix.",
-        `Make sure it's on a current release: ${Object.values(releases.latest).join(", ")} or newer.`,
-        "If you can't confirm quickly, CERT-EU advises taking the site offline until you can.",
+        "Send the message below to your hosting company or web developer today.",
+        "Ask them to confirm your PHP version is up to date, and to update it if it isn't.",
+        "If they can't confirm it quickly, ask them to take the site offline until they can.",
       ],
+      contactMessage: hostMessage(site, true, releases.latest),
       notes: base(),
     };
   }
@@ -360,83 +384,95 @@ function assess(det, cdn, releases) {
   const outdated = latest && full && cmpVersion(full, latest) < 0;
   const confidence = full ? "high" : "medium";
 
+  // End-of-life PHP.
   if (status === "eol") {
     return {
       level: "critical",
-      verdict: "Take offline, or upgrade now",
-      headline: `${label}: end-of-life`,
+      verdict: "Act now — your site is at risk",
+      headline: `Your site runs ${label}, which is no longer supported`,
       confidence,
-      summary: `PHP ${branch} no longer receives security updates. It will not get a fix for php2shell or any future flaw, so the server is exposed to unauthenticated remote code execution.`,
+      summary:
+        "Your website is on a very old version of PHP that no longer gets security updates. It won't be protected against this issue or future ones, so it's a real risk for hackers to take control of your site.",
       actions: [
-        "Take the site offline, or put it into maintenance mode, until PHP is upgraded.",
-        `Upgrade to a supported branch on a current release: ${Object.values(releases.latest).join(", ")} or newer.`,
-        "Test your site on the new version before bringing it back online. Old plugins and themes can break.",
-        "Check the server for signs of compromise: unknown files, new admin users, web processes spawning shells.",
+        "Send the message below to your hosting company or web developer now.",
+        "Ask them to take your site offline or into maintenance mode until it's fixed.",
+        "Ask them to move your site to a current, supported version of PHP (they'll know how).",
       ],
+      contactMessage: hostMessage(site, true, releases.latest),
       notes: base([
-        "Some Linux distributions (RHEL, Debian LTS) backport fixes to old PHP, so the version can look EOL but still be supported. Confirm with your host.",
+        "If they tell you your site is already protected, ask them to confirm that in writing.",
       ]),
     };
   }
 
+  // Vulnerable to php2shell.
   if (vulnPhp2shell) {
     return {
       level: "high",
-      verdict: "Patch today. If you can't, take the site offline",
-      headline: `${label}: vulnerable to php2shell`,
+      verdict: "Act today — your site is at risk",
+      headline: `Your site runs ${label}, which needs updating`,
       confidence,
-      summary: `This is older than ${floor}, the release that fixes php2shell on PHP ${branch}. It is exposed to unauthenticated remote code execution.`,
+      summary:
+        "Your website is running a version of PHP affected by this security issue. Until it's updated, hackers could potentially take control of your site.",
       actions: [
-        `Upgrade PHP to ${latest || floor} or newer today. Most hosts let you do this from the control panel, or will do it if you ask.`,
-        "If you can't patch quickly, CERT-EU advises taking the site offline until you can.",
-        "Interim hardening only (not a fix): set session.upload_progress.enabled = 0 and session.use_strict_mode = 1, then restart PHP-FPM.",
-        "After patching, check for signs of compromise: unknown files, new admin users, web processes spawning shells.",
+        "Send the message below to your hosting company or web developer today.",
+        "Ask them to update your PHP to a safe version as soon as possible.",
+        "If they can't do it today, ask them to take the site offline until they can.",
       ],
+      contactMessage: hostMessage(site, true, releases.latest),
       notes: base([
-        "Your host may backport fixes without changing the version number. If they say you're patched, ask them to confirm it in writing.",
+        "If they tell you your site is already protected, ask them to confirm that in writing.",
       ]),
     };
   }
 
+  // Branch known but exact release not visible.
   if (!full) {
     return {
       level: "high",
-      verdict: "Check your exact version",
-      headline: `${label}: patch level unknown`,
+      verdict: "Act today to be safe",
+      headline: `Your site runs ${label}, but we couldn't confirm the exact version`,
       confidence: "low",
-      summary: `We can see the ${branch} branch but not the exact release. The current release is ${latest || floor}.`,
+      summary:
+        "We can see roughly which PHP your site uses, but not exactly — so we can't be sure it's up to date. With a serious issue going around, it's safest to check today.",
       actions: [
-        `Confirm the server runs ${latest || floor} or newer.`,
-        "If it's behind and you can't update quickly, take the site offline.",
+        "Send the message below to your hosting company or web developer today.",
+        "Ask them to confirm your PHP is on the latest version, and update it if not.",
       ],
+      contactMessage: hostMessage(site, true, releases.latest),
       notes: base(),
     };
   }
 
+  // Safe from php2shell but behind the latest release.
   if (outdated) {
     return {
       level: "medium",
-      verdict: "Update available — plan an upgrade",
-      headline: `${label}: patched against php2shell, but out of date`,
+      verdict: "You're safe for now, but update soon",
+      headline: `Your site runs ${label} — safe from this issue, but a bit out of date`,
       confidence,
-      summary: `This is safe from php2shell, but PHP ${branch} has since moved on to ${latest}. Older releases miss later security fixes, so update when you can.`,
+      summary:
+        "Good news: your site is protected against this particular issue. But it's not on the very latest version of PHP, which means it's missing some other security updates. It's worth updating soon — this isn't urgent.",
       actions: [
-        `Update PHP to ${latest} to pick up the latest security fixes.`,
-        "This isn't an emergency for php2shell, but don't leave it for months.",
+        "No emergency action needed today.",
+        "When you have a moment, send the message below to your hosting company or web developer.",
       ],
+      contactMessage: hostMessage(site, false, releases.latest),
       notes: base(),
     };
   }
 
+  // Up to date.
   return {
     level: "low",
-    verdict: "Safe to keep online",
-    headline: `${label}: up to date`,
+    verdict: "You're all good — no action needed",
+    headline: `Your site runs ${label}, which is up to date`,
     confidence,
-    summary: `This is the current release for PHP ${branch}${latest ? ` (${latest})` : ""}, and it includes the php2shell fix.`,
+    summary:
+      "Your website is on the latest version of PHP and is protected against this security issue. Nothing to do right now.",
     actions: [
-      "No action needed right now. Keep applying PHP updates as they're released.",
-      "Hide the version header (expose_php = Off in php.ini) so attackers can't fingerprint your server.",
+      "No action needed.",
+      "Keep letting your host or developer apply updates as they come out.",
     ],
     notes: base(),
   };
@@ -495,7 +531,7 @@ async function scan(input) {
       cdn,
       pathsChecked: probePaths.length + 1,
     },
-    assessment: assess(det, cdn, releases),
+    assessment: assess(det, cdn, releases, main.finalUrl),
     advisory: {
       ...ADVISORY,
       php2shellFixed: PHP2SHELL_FIXED,
